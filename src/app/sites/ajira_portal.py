@@ -31,6 +31,41 @@ GENERIC_LINK_TEXTS = {
 
 MENU_LINK_TEXTS = {"home", "vacancies", "feedback", "login", "register", "contact"}
 ATTACHMENT_EXTENSIONS = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
+FOOTER_KEYWORDS = (
+    "download ajira portal app",
+    "download ajira app",
+    "download our app",
+    "download the app",
+    "download on the app store",
+    "get it on google play",
+    "google play",
+    "app store",
+    "play store",
+)
+STRUCTURED_FIELD_LABELS: dict[str, tuple[str, ...]] = {
+    "remuneration": ("remuneration", "salary", "pay", "pay scale"),
+    "application_period": (
+        "application period",
+        "application window",
+        "application timeline",
+        "application dates",
+        "application duration",
+    ),
+    "qualifications": (
+        "qualifications",
+        "qualification",
+        "minimum qualifications",
+        "required qualifications",
+        "requirements",
+    ),
+    "duties": (
+        "duties",
+        "responsibilities",
+        "roles",
+        "roles and responsibilities",
+        "duties and responsibilities",
+    ),
+}
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -326,6 +361,100 @@ def _extract_extra_metadata(tree: html.HtmlElement) -> dict[str, str]:
     return metadata
 
 
+def _remove_footer_sections(node: html.HtmlElement) -> None:
+    for footer in list(node.xpath(".//footer | .//index-footer")):
+        parent = footer.getparent()
+        if parent is not None:
+            parent.remove(footer)
+
+    for descendant in list(node.xpath(".//*")):
+        if not isinstance(descendant.tag, str):
+            continue
+        text = _normalize_whitespace(descendant.text_content()).lower()
+        if not text:
+            continue
+        if any(keyword in text for keyword in FOOTER_KEYWORDS):
+            parent = descendant.getparent()
+            if parent is not None:
+                parent.remove(descendant)
+
+
+def _node_matches_label(text: str, labels: tuple[str, ...]) -> bool:
+    normalized = _normalize_whitespace(text)
+    if not normalized:
+        return False
+    lower_text = normalized.lower()
+    if len(lower_text) > 120:
+        return False
+    for label in labels:
+        label_lower = label.lower()
+        if lower_text == label_lower:
+            return True
+        if lower_text.startswith(f"{label_lower}:") or lower_text.startswith(f"{label_lower}-"):
+            return True
+        if lower_text.startswith(label_lower + " ") and len(lower_text) <= len(label_lower) + 5:
+            return True
+    return False
+
+
+def _extract_value_after_label(node: html.HtmlElement, label_text: str | None) -> str | None:
+    for sibling in node.itersiblings():
+        if not isinstance(sibling.tag, str):
+            continue
+        if sibling.xpath(".//button"):
+            continue
+        text = _normalize_whitespace(sibling.text_content())
+        if text:
+            return text
+
+    parent = node.getparent()
+    if parent is not None and label_text:
+        parent_text = _normalize_whitespace(parent.text_content())
+        lower_parent = parent_text.lower()
+        lower_label = label_text.lower()
+        idx = lower_parent.find(lower_label)
+        if idx != -1:
+            remainder = parent_text[idx + len(label_text) :]
+            remainder = _normalize_whitespace(remainder)
+            if remainder:
+                return remainder
+
+    grandparent = parent.getparent() if parent is not None else None
+    if grandparent is not None and label_text:
+        grand_text = _normalize_whitespace(grandparent.text_content())
+        lower_grand = grand_text.lower()
+        lower_label = label_text.lower()
+        idx = lower_grand.find(lower_label)
+        if idx != -1:
+            remainder = grand_text[idx + len(label_text) :]
+            remainder = _normalize_whitespace(remainder)
+            if remainder:
+                return remainder
+
+    return None
+
+
+def _extract_structured_fields(tree: html.HtmlElement) -> dict[str, str]:
+    structured: dict[str, str] = {}
+    for key, labels in STRUCTURED_FIELD_LABELS.items():
+        for node in tree.iter():
+            if not isinstance(node.tag, str):
+                continue
+            if node.tag.lower() in {"script", "style", "noscript"}:
+                continue
+            text = _normalize_whitespace(node.text_content())
+            if not text:
+                continue
+            if _node_matches_label(text, labels):
+                value = _extract_value_after_label(node, text)
+                if value:
+                    structured[key] = value
+                    break
+        if key in structured:
+            continue
+    return structured
+
+
 def _extract_description(tree: html.HtmlElement) -> tuple[str | None, str | None]:
     for node in tree.xpath("//script|//style|//noscript"):
         node.getparent().remove(node)
@@ -343,6 +472,8 @@ def _extract_description(tree: html.HtmlElement) -> tuple[str | None, str | None
         body_nodes = tree.xpath("//body")
         best = body_nodes[0] if body_nodes else tree
 
+    _remove_footer_sections(best)
+
     description_text = _normalize_whitespace(best.text_content())
     if len(description_text) < 20:
         return None, None
@@ -353,12 +484,13 @@ def _extract_description(tree: html.HtmlElement) -> tuple[str | None, str | None
 
 def parse_listing_detail_from_html(
     page_html: str, base_url: str
-) -> tuple[str | None, str | None, list[str], dict[str, str]]:
+) -> tuple[str | None, str | None, list[str], dict[str, str], dict[str, str]]:
     tree = html.fromstring(page_html)
     description_text, description_html = _extract_description(tree)
     attachments = _extract_attachments(tree, base_url=base_url)
     extra_metadata = _extract_extra_metadata(tree)
-    return description_text, description_html, attachments, extra_metadata
+    structured_fields = _extract_structured_fields(tree)
+    return description_text, description_html, attachments, extra_metadata, structured_fields
 
 
 def compute_content_hash(payload: dict[str, object]) -> str:
@@ -452,7 +584,7 @@ class AjiraPortalSite:
                     await asyncio.sleep(0.5)
 
                 html_content = await page.content()
-                description_text, description_html, attachments, extra_metadata = parse_listing_detail_from_html(
+                description_text, description_html, attachments, extra_metadata, structured_fields = parse_listing_detail_from_html(
                     html_content, base_url=details_url
                 )
             except Exception as exc:
@@ -461,6 +593,7 @@ class AjiraPortalSite:
                 description_html = None
                 attachments = []
                 extra_metadata = {}
+                structured_fields = {}
             finally:
                 await page.close()
                 await asyncio.sleep(0.2)
@@ -475,6 +608,7 @@ class AjiraPortalSite:
                 "description_html": description_html,
                 "attachments": sorted(attachments),
                 "extra_metadata": extra_metadata,
+                "structured_fields": structured_fields or None,
             }
 
             return ListingDetail(
@@ -487,6 +621,7 @@ class AjiraPortalSite:
                 description_html=description_html,
                 attachments=attachments or None,
                 extra_metadata=extra_metadata or None,
+                structured_fields=structured_fields or None,
                 content_hash=compute_content_hash(hash_input),
             )
 

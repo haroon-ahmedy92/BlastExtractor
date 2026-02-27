@@ -15,4 +15,5 @@ class ListingDetail(BaseModel):
     description_html: str | None = None
     attachments: list[str] | None = None
     extra_metadata: dict[str, str] | None = None
+    structured_fields: dict[str, str] | None = None
     content_hash: str
