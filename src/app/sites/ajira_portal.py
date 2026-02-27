@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 from datetime import date, datetime
@@ -10,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 from lxml import html
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from app.models.listing_detail import ListingDetail
 from app.models.listing_stub import ListingStub
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,7 @@ GENERIC_LINK_TEXTS = {
 }
 
 MENU_LINK_TEXTS = {"home", "vacancies", "feedback", "login", "register", "contact"}
+ATTACHMENT_EXTENSIONS = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -257,12 +261,115 @@ def parse_listing_stubs_from_html(page_html: str, base_url: str = VACANCIES_URL)
     return _parse_from_links(tree, base_url=base_url)
 
 
+def _extract_attachments(tree: html.HtmlElement, base_url: str) -> list[str]:
+    attachments: list[str] = []
+    seen: set[str] = set()
+    for link in tree.xpath("//a[@href]"):
+        href = _normalize_whitespace(link.get("href", ""))
+        text = _normalize_whitespace(link.text_content()).lower()
+        if not href:
+            continue
+        lower_href = href.lower()
+        looks_attachment = lower_href.endswith(ATTACHMENT_EXTENSIONS) or "download" in lower_href
+        looks_attachment = looks_attachment or any(k in text for k in ("attachment", "pdf", "doc", "download"))
+        if not looks_attachment:
+            continue
+        absolute = urljoin(base_url, href)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        attachments.append(absolute)
+    return attachments
+
+
+def _extract_extra_metadata(tree: html.HtmlElement) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+
+    for row in tree.xpath("//tr[td and (count(td)=2 or count(th)=1 and count(td)=1)]"):
+        key_node = row.xpath("./th[1] | ./td[1]")
+        val_node = row.xpath("./td[last()]")
+        if not key_node or not val_node:
+            continue
+        key = _normalize_whitespace(key_node[0].text_content()).rstrip(":").lower()
+        value = _normalize_whitespace(val_node[0].text_content())
+        if not key or not value:
+            continue
+        if len(key) > 60 or len(value) > 500:
+            continue
+        metadata[key] = value
+
+    dts = tree.xpath("//dt")
+    for dt in dts:
+        dd = dt.getnext()
+        if dd is None or dd.tag.lower() != "dd":
+            continue
+        key = _normalize_whitespace(dt.text_content()).rstrip(":").lower()
+        value = _normalize_whitespace(dd.text_content())
+        if key and value and len(key) <= 60 and len(value) <= 500:
+            metadata[key] = value
+
+    for node in tree.xpath("//p|//li"):
+        text = _normalize_whitespace(node.text_content())
+        if ":" not in text or len(text) < 6 or len(text) > 300:
+            continue
+        left, right = text.split(":", 1)
+        key = _normalize_whitespace(left).lower()
+        value = _normalize_whitespace(right)
+        if not key or not value:
+            continue
+        if len(key) > 60 or len(value) > 500:
+            continue
+        if key in {"number of posts", "deadline", "close date", "advert name", "employer name"}:
+            continue
+        metadata.setdefault(key, value)
+
+    return metadata
+
+
+def _extract_description(tree: html.HtmlElement) -> tuple[str | None, str | None]:
+    for node in tree.xpath("//script|//style|//noscript"):
+        node.getparent().remove(node)
+
+    candidates = tree.xpath("//main|//article|//section|//div[contains(@class,'description') or contains(@class,'content')]")
+    best = None
+    best_len = 0
+    for node in candidates:
+        text = _normalize_whitespace(node.text_content())
+        if len(text) > best_len:
+            best = node
+            best_len = len(text)
+
+    if best is None:
+        body_nodes = tree.xpath("//body")
+        best = body_nodes[0] if body_nodes else tree
+
+    description_text = _normalize_whitespace(best.text_content())
+    if len(description_text) < 20:
+        return None, None
+
+    description_html = html.tostring(best, encoding="unicode", method="html")
+    return description_text, description_html
+
+
+def parse_listing_detail_from_html(
+    page_html: str, base_url: str
+) -> tuple[str | None, str | None, list[str], dict[str, str]]:
+    tree = html.fromstring(page_html)
+    description_text, description_html = _extract_description(tree)
+    attachments = _extract_attachments(tree, base_url=base_url)
+    extra_metadata = _extract_extra_metadata(tree)
+    return description_text, description_html, attachments, extra_metadata
+
+
+def compute_content_hash(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class AjiraPortalSite:
     vacancies_url = VACANCIES_URL
 
-    async def _resolve_detail_urls_from_row_actions(
-        self, page, item_count: int
-    ) -> list[str | None]:
+    async def _resolve_detail_urls_from_row_actions(self, page, item_count: int) -> list[str | None]:
         urls: list[str | None] = []
         rows = page.locator("table tbody tr")
         row_count = await rows.count()
@@ -279,10 +386,7 @@ class AjiraPortalSite:
                 await page.wait_for_url(re.compile(r".*/view-advert/.*"), timeout=8000)
                 current = page.url
                 parsed = urlparse(current)
-                if "/view-advert/" in parsed.path:
-                    urls.append(current)
-                else:
-                    urls.append(None)
+                urls.append(current if "/view-advert/" in parsed.path else None)
             except Exception:
                 urls.append(None)
             finally:
@@ -333,3 +437,81 @@ class AjiraPortalSite:
             extra={"count": len(listings), "elapsed_seconds": round(perf_counter() - started, 2)},
         )
         return listings
+
+    async def _fetch_single_detail(self, context, stub: ListingStub, semaphore: asyncio.Semaphore) -> ListingDetail:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        async with semaphore:
+            page = await context.new_page()
+            details_url = str(stub.details_url)
+            try:
+                await page.goto(details_url, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=12000)
+                except PlaywrightTimeoutError:
+                    await asyncio.sleep(0.5)
+
+                html_content = await page.content()
+                description_text, description_html, attachments, extra_metadata = parse_listing_detail_from_html(
+                    html_content, base_url=details_url
+                )
+            except Exception as exc:
+                logger.warning("Failed to fetch listing detail", extra={"url": details_url, "error": str(exc)})
+                description_text = None
+                description_html = None
+                attachments = []
+                extra_metadata = {}
+            finally:
+                await page.close()
+                await asyncio.sleep(0.2)
+
+            hash_input = {
+                "source_url": details_url,
+                "title": stub.title,
+                "institution": stub.institution,
+                "number_of_posts": stub.number_of_posts,
+                "deadline_date": str(stub.deadline_date) if stub.deadline_date else None,
+                "description_text": description_text,
+                "description_html": description_html,
+                "attachments": sorted(attachments),
+                "extra_metadata": extra_metadata,
+            }
+
+            return ListingDetail(
+                title=stub.title,
+                institution=stub.institution,
+                number_of_posts=stub.number_of_posts,
+                deadline_date=stub.deadline_date,
+                details_url=stub.details_url,
+                description_text=description_text,
+                description_html=description_html,
+                attachments=attachments or None,
+                extra_metadata=extra_metadata or None,
+                content_hash=compute_content_hash(hash_input),
+            )
+
+    async def fetch_listing_details(
+        self, listings: list[ListingStub], max_concurrency: int = 4
+    ) -> list[ListingDetail]:
+        from playwright.async_api import async_playwright
+
+        if not listings:
+            return []
+
+        semaphore = asyncio.Semaphore(max(1, min(5, max_concurrency)))
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context()
+
+            tasks = [self._fetch_single_detail(context, listing, semaphore) for listing in listings]
+            detailed = await asyncio.gather(*tasks)
+
+            await context.close()
+            await browser.close()
+
+        return detailed
+
+    async def crawl_with_details(self, max_concurrency: int = 4) -> list[ListingDetail]:
+        stubs = await self.fetch_listing_stubs()
+        return await self.fetch_listing_details(stubs, max_concurrency=max_concurrency)

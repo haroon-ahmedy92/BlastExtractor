@@ -34,12 +34,12 @@ def test_insert_and_dedupe_by_source_url(tmp_path) -> None:
             }
 
             async with session_factory() as session:
-                first, created = await upsert_job_posting(session, payload)
+                first, action = await upsert_job_posting(session, payload)
                 await session.commit()
                 first_id = first.id
                 first_seen = first.first_seen
 
-                assert created is True
+                assert action == "inserted"
                 assert first_id is not None
 
             updated_payload: JobPostingInput = {
@@ -49,10 +49,10 @@ def test_insert_and_dedupe_by_source_url(tmp_path) -> None:
             }
 
             async with session_factory() as session:
-                second, created = await upsert_job_posting(session, updated_payload)
+                second, action = await upsert_job_posting(session, updated_payload)
                 await session.commit()
 
-                assert created is False
+                assert action == "updated"
                 assert second.id == first_id
 
                 total = await session.scalar(
@@ -63,8 +63,17 @@ def test_insert_and_dedupe_by_source_url(tmp_path) -> None:
                 assert total == 1
                 assert second.title == "Senior Software Engineer"
                 assert second.content_hash == "hash-v2"
-                assert second.first_seen == first_seen
-                assert second.last_seen >= second.first_seen
+                assert second.first_seen.replace(tzinfo=first_seen.tzinfo) == first_seen
+                normalized_last_seen = second.last_seen.replace(tzinfo=first_seen.tzinfo)
+                assert normalized_last_seen >= first_seen
+
+            async with session_factory() as session:
+                third, action = await upsert_job_posting(session, updated_payload)
+                await session.commit()
+
+                assert action == "unchanged"
+                assert third.id == first_id
+                assert third.content_hash == "hash-v2"
         finally:
             await engine.dispose()
 

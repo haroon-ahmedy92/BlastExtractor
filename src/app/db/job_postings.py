@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,9 +24,12 @@ class JobPostingInput(TypedDict):
     attachments_json: dict[str, Any] | list[Any] | None
 
 
+UpsertAction = Literal["inserted", "updated", "unchanged"]
+
+
 async def upsert_job_posting(
     session: AsyncSession, payload: JobPostingInput
-) -> tuple[JobPosting, bool]:
+) -> tuple[JobPosting, UpsertAction]:
     result = await session.execute(
         select(JobPosting).where(JobPosting.source_url == payload["source_url"])
     )
@@ -34,20 +37,24 @@ async def upsert_job_posting(
     now = datetime.now(UTC)
 
     if existing is not None:
-        existing.source = payload["source"]
-        existing.title = payload["title"]
-        existing.institution = payload["institution"]
-        existing.number_of_posts = payload["number_of_posts"]
-        existing.deadline_date = payload["deadline_date"]
-        existing.category = payload["category"]
-        existing.location = payload["location"]
-        existing.description_text = payload["description_text"]
-        existing.description_html = payload["description_html"]
-        existing.attachments_json = payload["attachments_json"]
-        existing.content_hash = payload["content_hash"]
         existing.last_seen = now
+        existing.source = payload["source"]
+        changed = existing.content_hash != payload["content_hash"]
+
+        if changed:
+            existing.title = payload["title"]
+            existing.institution = payload["institution"]
+            existing.number_of_posts = payload["number_of_posts"]
+            existing.deadline_date = payload["deadline_date"]
+            existing.category = payload["category"]
+            existing.location = payload["location"]
+            existing.description_text = payload["description_text"]
+            existing.description_html = payload["description_html"]
+            existing.attachments_json = payload["attachments_json"]
+            existing.content_hash = payload["content_hash"]
+
         await session.flush()
-        return existing, False
+        return existing, "updated" if changed else "unchanged"
 
     posting = JobPosting(
         source=payload["source"],
@@ -67,4 +74,4 @@ async def upsert_job_posting(
     )
     session.add(posting)
     await session.flush()
-    return posting, True
+    return posting, "inserted"
