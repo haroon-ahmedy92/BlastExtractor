@@ -5,12 +5,15 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from time import perf_counter
-from urllib.parse import urljoin, urlparse
+from time import monotonic, perf_counter
+from urllib.parse import urljoin, urlparse, urlsplit
 
 from lxml import html
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import AsyncRetrying, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.models.listing_detail import ListingDetail
 from app.models.listing_stub import ListingStub
@@ -66,6 +69,53 @@ STRUCTURED_FIELD_LABELS: dict[str, tuple[str, ...]] = {
         "duties and responsibilities",
     ),
 }
+BLOCKED_RESOURCE_TYPES = {"font", "image", "media"}
+
+
+@dataclass(slots=True)
+class CrawlRunStats:
+    listing_pages: int = 0
+    detail_attempted: int = 0
+    detail_succeeded: int = 0
+    detail_failed: int = 0
+    retries: int = 0
+    transient_errors: int = 0
+    permanent_errors: int = 0
+    blocked_requests: int = 0
+    rate_limited_waits: int = 0
+    started_at: float = field(default_factory=perf_counter)
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return round(perf_counter() - self.started_at, 2)
+
+
+class CrawlTransientError(RuntimeError):
+    """Retryable crawler failure."""
+
+
+class CrawlPermanentError(RuntimeError):
+    """Non-retryable crawler failure."""
+
+
+class HostRateLimiter:
+    def __init__(self, minimum_interval_seconds: float) -> None:
+        self.minimum_interval_seconds = minimum_interval_seconds
+        self._lock = asyncio.Lock()
+        self._last_request_started: dict[str, float] = {}
+
+    async def wait(self, url: str, stats: CrawlRunStats) -> None:
+        host = urlsplit(url).netloc or "default"
+        async with self._lock:
+            now = monotonic()
+            previous = self._last_request_started.get(host)
+            if previous is not None:
+                delay = self.minimum_interval_seconds - (now - previous)
+                if delay > 0:
+                    stats.rate_limited_waits += 1
+                    await asyncio.sleep(delay)
+                    now = monotonic()
+            self._last_request_started[host] = now
 
 
 def _normalize_whitespace(value: str) -> str:
@@ -498,8 +548,30 @@ def compute_content_hash(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def classify_crawl_error(exc: Exception) -> tuple[type[Exception], str]:
+    message = str(exc).lower()
+    transient_markers = (
+        "timeout",
+        "timed out",
+        "net::err",
+        "connection reset",
+        "temporarily unavailable",
+        "econnreset",
+        "econnrefused",
+        "503",
+        "502",
+        "500",
+    )
+    if any(marker in message for marker in transient_markers):
+        return CrawlTransientError, "transient"
+    return CrawlPermanentError, "permanent"
+
+
 class AjiraPortalSite:
     vacancies_url = VACANCIES_URL
+
+    def __init__(self, *, rate_limit_seconds: float = 0.25) -> None:
+        self.rate_limiter = HostRateLimiter(rate_limit_seconds)
 
     async def _resolve_detail_urls_from_row_actions(self, page, item_count: int) -> list[str | None]:
         urls: list[str | None] = []
@@ -524,35 +596,98 @@ class AjiraPortalSite:
             finally:
                 if "/view-advert/" in page.url:
                     await page.go_back(wait_until="domcontentloaded")
-                    try:
+                    with suppress(Exception):
                         await page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        pass
                     await asyncio.sleep(0.2)
 
         return urls
 
-    @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
-    async def fetch_listing_stubs(self) -> list[ListingStub]:
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
+    async def _block_unneeded_resources(self, route, request, stats: CrawlRunStats) -> None:
+        if request.resource_type in BLOCKED_RESOURCE_TYPES:
+            stats.blocked_requests += 1
+            await route.abort()
+            return
+        await route.continue_()
 
-        started = perf_counter()
+    @asynccontextmanager
+    async def browser_session(self, stats: CrawlRunStats) -> AsyncIterator[object]:
+        from playwright.async_api import async_playwright
+
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            await page.goto(self.vacancies_url, wait_until="domcontentloaded")
-
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            context = await browser.new_context(ignore_https_errors=True)
+            await context.route(
+                "**/*",
+                lambda route, request: self._block_unneeded_resources(route, request, stats),
+            )
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except PlaywrightTimeoutError:
-                await page.wait_for_selector("table tbody tr, article, li", timeout=15000)
+                yield context
+            finally:
+                await context.close()
+                await browser.close()
 
-            await asyncio.sleep(1.0)
-            content = await page.content()
+    def _raise_classified_crawl_error(self, exc: Exception, stats: CrawlRunStats) -> None:
+        error_type, label = classify_crawl_error(exc)
+        if label == "transient":
+            stats.transient_errors += 1
+        else:
+            stats.permanent_errors += 1
+        raise error_type(str(exc)) from exc
+
+    async def _load_page_content(
+        self,
+        page,
+        *,
+        url: str,
+        stats: CrawlRunStats,
+        wait_selector: str | None = None,
+    ) -> str:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        async for attempt in AsyncRetrying(
+            reraise=True,
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            retry=retry_if_exception_type(CrawlTransientError),
+        ):
+            with attempt:
+                if attempt.retry_state.attempt_number > 1:
+                    stats.retries += 1
+                await self.rate_limiter.wait(url, stats)
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        if wait_selector is not None:
+                            await page.wait_for_selector(wait_selector, timeout=15000)
+                        else:
+                            raise
+                    return await page.content()
+                except Exception as exc:
+                    self._raise_classified_crawl_error(exc, stats)
+        raise CrawlTransientError(f"Failed to load page: {url}")
+
+    async def fetch_listing_stubs_from_context(
+        self,
+        context,
+        *,
+        stats: CrawlRunStats,
+    ) -> list[ListingStub]:
+        stats.listing_pages += 1
+        page = await context.new_page()
+        started = perf_counter()
+        try:
+            content = await self._load_page_content(
+                page,
+                url=self.vacancies_url,
+                stats=stats,
+                wait_selector="table tbody tr, article, li",
+            )
             listings = parse_listing_stubs_from_html(content, base_url=self.vacancies_url)
-
             detail_urls = await self._resolve_detail_urls_from_row_actions(page, len(listings))
             for idx, url in enumerate(detail_urls):
                 if idx >= len(listings) or not url:
@@ -560,43 +695,67 @@ class AjiraPortalSite:
                 payload = listings[idx].model_dump(mode="python")
                 payload["details_url"] = url
                 listings[idx] = ListingStub(**payload)
-
-            await context.close()
-            await browser.close()
+        finally:
+            await page.close()
 
         logger.info(
             "Ajira listings extracted",
-            extra={"count": len(listings), "elapsed_seconds": round(perf_counter() - started, 2)},
+            extra={
+                "count": len(listings),
+                "elapsed_seconds": round(perf_counter() - started, 2),
+            },
         )
         return listings
 
-    async def _fetch_single_detail(self, context, stub: ListingStub, semaphore: asyncio.Semaphore) -> ListingDetail:
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
+    async def fetch_listing_stubs(self, *, stats: CrawlRunStats | None = None) -> list[ListingStub]:
+        crawl_stats = stats or CrawlRunStats()
+        async with self.browser_session(crawl_stats) as context:
+            return await self.fetch_listing_stubs_from_context(context, stats=crawl_stats)
+
+    async def _fetch_single_detail(
+        self,
+        context,
+        stub: ListingStub,
+        semaphore: asyncio.Semaphore,
+        *,
+        stats: CrawlRunStats,
+    ) -> ListingDetail | None:
+        stats.detail_attempted += 1
+        details_url = str(stub.details_url)
 
         async with semaphore:
             page = await context.new_page()
-            details_url = str(stub.details_url)
             try:
-                await page.goto(details_url, wait_until="domcontentloaded")
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=12000)
-                except PlaywrightTimeoutError:
-                    await asyncio.sleep(0.5)
-
-                html_content = await page.content()
-                description_text, description_html, attachments, extra_metadata, structured_fields = parse_listing_detail_from_html(
+                html_content = await self._load_page_content(
+                    page,
+                    url=details_url,
+                    stats=stats,
+                )
+                (
+                    description_text,
+                    description_html,
+                    attachments,
+                    extra_metadata,
+                    structured_fields,
+                ) = parse_listing_detail_from_html(
                     html_content, base_url=details_url
                 )
             except Exception as exc:
-                logger.warning("Failed to fetch listing detail", extra={"url": details_url, "error": str(exc)})
-                description_text = None
-                description_html = None
-                attachments = []
-                extra_metadata = {}
-                structured_fields = {}
+                stats.detail_failed += 1
+                error_type, label = classify_crawl_error(exc)
+                logger.warning(
+                    "Failed to fetch listing detail",
+                    extra={
+                        "url": details_url,
+                        "error": str(exc),
+                        "classification": label,
+                        "error_type": error_type.__name__,
+                    },
+                )
+                return None
             finally:
                 await page.close()
-                await asyncio.sleep(0.2)
 
             hash_input = {
                 "source_url": details_url,
@@ -611,6 +770,7 @@ class AjiraPortalSite:
                 "structured_fields": structured_fields or None,
             }
 
+            stats.detail_succeeded += 1
             return ListingDetail(
                 title=stub.title,
                 institution=stub.institution,
@@ -626,27 +786,56 @@ class AjiraPortalSite:
             )
 
     async def fetch_listing_details(
-        self, listings: list[ListingStub], max_concurrency: int = 4
+        self,
+        listings: list[ListingStub],
+        max_concurrency: int = 4,
+        *,
+        stats: CrawlRunStats | None = None,
     ) -> list[ListingDetail]:
-        from playwright.async_api import async_playwright
-
+        crawl_stats = stats or CrawlRunStats()
         if not listings:
             return []
+        async with self.browser_session(crawl_stats) as context:
+            return await self.fetch_listing_details_from_context(
+                context,
+                listings,
+                max_concurrency=max_concurrency,
+                stats=crawl_stats,
+            )
 
+    async def fetch_listing_details_from_context(
+        self,
+        context,
+        listings: list[ListingStub],
+        *,
+        max_concurrency: int = 4,
+        stats: CrawlRunStats,
+    ) -> list[ListingDetail]:
         semaphore = asyncio.Semaphore(max(1, min(5, max_concurrency)))
+        tasks = [
+            self._fetch_single_detail(
+                context,
+                listing,
+                semaphore,
+                stats=stats,
+            )
+            for listing in listings
+        ]
+        detailed = await asyncio.gather(*tasks)
+        return [item for item in detailed if item is not None]
 
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context()
-
-            tasks = [self._fetch_single_detail(context, listing, semaphore) for listing in listings]
-            detailed = await asyncio.gather(*tasks)
-
-            await context.close()
-            await browser.close()
-
-        return detailed
-
-    async def crawl_with_details(self, max_concurrency: int = 4) -> list[ListingDetail]:
-        stubs = await self.fetch_listing_stubs()
-        return await self.fetch_listing_details(stubs, max_concurrency=max_concurrency)
+    async def crawl_with_details(
+        self,
+        max_concurrency: int = 4,
+        *,
+        stats: CrawlRunStats | None = None,
+    ) -> list[ListingDetail]:
+        crawl_stats = stats or CrawlRunStats()
+        async with self.browser_session(crawl_stats) as context:
+            stubs = await self.fetch_listing_stubs_from_context(context, stats=crawl_stats)
+            return await self.fetch_listing_details_from_context(
+                context,
+                stubs,
+                max_concurrency=max_concurrency,
+                stats=crawl_stats,
+            )

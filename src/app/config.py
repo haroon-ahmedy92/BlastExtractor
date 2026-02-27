@@ -13,6 +13,9 @@ class Settings:
     database_url: str
     ajira_url: str
     crawler_timeout_seconds: int
+    scheduler_interval_minutes: int
+    scheduler_refresh_after_days: int
+    scheduler_lock_path: str
 
 
 @lru_cache(maxsize=1)
@@ -28,4 +31,7 @@ def get_settings() -> Settings:
         ),
         ajira_url=os.getenv("AJIRA_URL", "https://www.ajira.go.tz/"),
         crawler_timeout_seconds=int(os.getenv("CRAWLER_TIMEOUT_SECONDS", "30")),
+        scheduler_interval_minutes=int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "30")),
+        scheduler_refresh_after_days=int(os.getenv("SCHEDULER_REFRESH_AFTER_DAYS", "7")),
+        scheduler_lock_path=os.getenv("SCHEDULER_LOCK_PATH", "/tmp/blastextractor-scheduler.lock"),
     )
