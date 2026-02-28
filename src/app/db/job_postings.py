@@ -1,77 +1,78 @@
+"""Persistence helpers for job posting records.
+
+Adapters that emit :class:`app.models.jobs.JobRecord` call
+:func:`upsert_job_posting` near the end of the crawl flow. The function dedupes
+by ``source_url``, updates ``last_seen``, and only rewrites content fields when
+the ``content_hash`` changes.
+"""
+
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
-from typing import Any, Literal, TypedDict
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.common import UpsertAction, UpsertResult
 from app.models.job_posting import JobPosting
-
-
-class JobPostingInput(TypedDict):
-    source: str
-    source_url: str
-    title: str
-    institution: str
-    content_hash: str
-    number_of_posts: int | None
-    deadline_date: date | None
-    category: str | None
-    location: str | None
-    description_text: str | None
-    description_html: str | None
-    attachments_json: dict[str, Any] | list[Any] | None
-
-
-UpsertAction = Literal["inserted", "updated", "unchanged"]
+from app.models.jobs import JobRecord
 
 
 async def upsert_job_posting(
-    session: AsyncSession, payload: JobPostingInput
-) -> tuple[JobPosting, UpsertAction]:
-    result = await session.execute(
-        select(JobPosting).where(JobPosting.source_url == payload["source_url"])
+    session: AsyncSession,
+    record: JobRecord,
+) -> tuple[JobPosting, UpsertResult]:
+    """Insert or update a job posting row.
+
+    Args:
+        session: Active database session.
+        record: Normalized job record from an adapter.
+
+    Returns:
+        tuple[JobPosting, UpsertResult]: Stored ORM row and action summary.
+    """
+
+    query_result = await session.execute(
+        select(JobPosting).where(JobPosting.source_url == str(record.source_url))
     )
-    existing = result.scalar_one_or_none()
-    now = datetime.now(UTC)
+    existing_posting = query_result.scalar_one_or_none()
+    current_time = datetime.now(UTC)
 
-    if existing is not None:
-        existing.last_seen = now
-        existing.source = payload["source"]
-        changed = existing.content_hash != payload["content_hash"]
-
-        if changed:
-            existing.title = payload["title"]
-            existing.institution = payload["institution"]
-            existing.number_of_posts = payload["number_of_posts"]
-            existing.deadline_date = payload["deadline_date"]
-            existing.category = payload["category"]
-            existing.location = payload["location"]
-            existing.description_text = payload["description_text"]
-            existing.description_html = payload["description_html"]
-            existing.attachments_json = payload["attachments_json"]
-            existing.content_hash = payload["content_hash"]
-
+    if existing_posting is not None:
+        existing_posting.last_seen = current_time
+        existing_posting.source = record.source
+        action: UpsertAction = "unchanged"
+        if existing_posting.content_hash != record.content_hash:
+            existing_posting.title = record.title
+            existing_posting.institution = record.institution
+            existing_posting.number_of_posts = record.number_of_posts
+            existing_posting.deadline_date = record.deadline_date
+            existing_posting.category = record.category
+            existing_posting.location = record.location
+            existing_posting.description_text = record.description_text
+            existing_posting.description_html = record.description_html
+            existing_posting.attachments_json = record.attachments_json
+            existing_posting.content_hash = record.content_hash
+            action = "updated"
         await session.flush()
-        return existing, "updated" if changed else "unchanged"
+        return existing_posting, UpsertResult(action=action, record_id=existing_posting.id)
 
-    posting = JobPosting(
-        source=payload["source"],
-        source_url=payload["source_url"],
-        title=payload["title"],
-        institution=payload["institution"],
-        number_of_posts=payload["number_of_posts"],
-        deadline_date=payload["deadline_date"],
-        category=payload["category"],
-        location=payload["location"],
-        description_text=payload["description_text"],
-        description_html=payload["description_html"],
-        attachments_json=payload["attachments_json"],
-        content_hash=payload["content_hash"],
-        first_seen=now,
-        last_seen=now,
+    new_posting = JobPosting(
+        source=record.source,
+        source_url=str(record.source_url),
+        title=record.title,
+        institution=record.institution,
+        number_of_posts=record.number_of_posts,
+        deadline_date=record.deadline_date,
+        category=record.category,
+        location=record.location,
+        description_text=record.description_text,
+        description_html=record.description_html,
+        attachments_json=record.attachments_json,
+        content_hash=record.content_hash,
+        first_seen=current_time,
+        last_seen=current_time,
     )
-    session.add(posting)
+    session.add(new_posting)
     await session.flush()
-    return posting, "inserted"
+    return new_posting, UpsertResult(action="inserted", record_id=new_posting.id)

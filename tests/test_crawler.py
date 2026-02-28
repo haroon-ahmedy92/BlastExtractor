@@ -1,35 +1,45 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import date
 from pathlib import Path
 
-from app.crawler.crawl_ajira import export_jsonl
-from app.models.listing_detail import ListingDetail
+from app.crawler.run import export_jsonl, run_site_once
+from app.models.news import NewsRecord
 
 
 def test_export_jsonl_writes_one_json_document_per_line(tmp_path: Path) -> None:
-    target = tmp_path / "jobs.jsonl"
-    items = [
-        ListingDetail(
-            title="Data Engineer",
-            institution="Public Data Agency",
-            number_of_posts=2,
-            deadline_date=date(2026, 3, 10),
-            details_url="https://example.com/jobs/1",
-            description_text="Build reliable data pipelines",
-            description_html="<p>Build reliable data pipelines</p>",
-            attachments=None,
-            extra_metadata=None,
-            structured_fields={"remuneration": "TGS B"},
+    target = tmp_path / "records.jsonl"
+    records = [
+        NewsRecord(
+            source="news_stub",
+            source_url="https://example.com/news/1",
+            title="Headline",
+            author="Author",
+            published_at=None,
+            body_text="Body",
+            body_html="<p>Body</p>",
+            tags_json=["news"],
+            attachments_json=None,
             content_hash="hash-1",
         )
     ]
 
-    export_jsonl(str(target), items)
+    export_jsonl(str(target), records)
 
     lines = target.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["title"] == "Data Engineer"
-    assert payload["structured_fields"]["remuneration"] == "TGS B"
+    assert payload["title"] == "Headline"
+
+
+def test_run_site_once_succeeds_for_stub_adapters() -> None:
+    async def scenario() -> None:
+        news_report = await run_site_once(site_name="news_stub", concurrency=2)
+        exam_report = await run_site_once(site_name="exam_stub", concurrency=2)
+        assert news_report.discovered == 0
+        assert news_report.failed == 0
+        assert exam_report.discovered == 0
+        assert exam_report.failed == 0
+
+    asyncio.run(scenario())

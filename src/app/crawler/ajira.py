@@ -1,3 +1,10 @@
+"""Legacy Ajira crawl helpers for quick smoke tests.
+
+This module offers a simple HTTP fetch path and a Playwright fallback that
+read the Ajira home page title. It is separate from the generic adapter-driven
+crawl flow, but remains useful for low-level connectivity checks.
+"""
+
 import asyncio
 import logging
 
@@ -10,21 +17,45 @@ logger = logging.getLogger(__name__)
 
 
 def extract_title(page_html: str) -> str:
+    """Extract the HTML document title.
+
+    Args:
+        page_html: Raw HTML document.
+
+    Returns:
+        str: Page title or ``"N/A"`` when missing.
+    """
+
     tree = html.fromstring(page_html)
     title = tree.xpath("string(//title)").strip()
     return title or "N/A"
 
 
 async def crawl_with_httpx() -> str:
+    """Fetch Ajira over HTTP and return the page title.
+
+    Returns:
+        str: Extracted page title.
+    """
+
     page_html = await fetch_html()
     return extract_title(page_html)
 
 
 async def crawl_with_playwright(url: str) -> str:
+    """Fetch a page title with Playwright.
+
+    Args:
+        url: Page URL to open.
+
+    Returns:
+        str: Browser-reported title.
+    """
+
     from playwright.async_api import async_playwright
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto(url, wait_until="domcontentloaded")
         title = await page.title()
@@ -33,6 +64,12 @@ async def crawl_with_playwright(url: str) -> str:
 
 
 async def main() -> None:
+    """Run a simple Ajira connectivity crawl.
+
+    Returns:
+        None
+    """
+
     setup_logging()
     from app.config import get_settings
 
@@ -41,8 +78,8 @@ async def main() -> None:
     try:
         title = await crawl_with_httpx()
         logger.info("Ajira crawl completed", extra={"method": "httpx", "title": title})
-    except Exception as exc:
-        logger.warning("HTTP crawl failed, falling back to Playwright", extra={"error": str(exc)})
+    except Exception as error:
+        logger.warning("HTTP crawl failed, falling back to Playwright", extra={"error": str(error)})
         title = await crawl_with_playwright(settings.ajira_url)
         logger.info("Ajira crawl completed", extra={"method": "playwright", "title": title})
 

@@ -1,3 +1,9 @@
+"""SQLAlchemy model for stored job postings.
+
+Job adapters upsert into this table after fetching and normalizing detail
+pages. The API reads from this table when serving job endpoints.
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
@@ -10,6 +16,8 @@ from app.db.base import Base
 
 
 class JobPosting(Base):
+    """Persistent job posting row."""
+
     __tablename__ = "job_postings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
