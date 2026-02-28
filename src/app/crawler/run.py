@@ -55,11 +55,31 @@ def export_jsonl(path: str, records: Sequence[BaseRecord]) -> None:
             output_file.write("\n")
 
 
+def print_debug_example(label: str, payload: object) -> None:
+    """Print one debug payload as formatted JSON.
+
+    Args:
+        label: Human-readable label for the payload.
+        payload: Pydantic model or JSON-serializable object.
+
+    Returns:
+        None
+    """
+
+    if hasattr(payload, "model_dump"):
+        serialized = payload.model_dump(mode="json")
+    else:
+        serialized = payload
+    print(f"\nDebug {label}", file=sys.stderr)
+    print(json.dumps(serialized, indent=2, ensure_ascii=False), file=sys.stderr)
+
+
 async def run_site_once(
     *,
     site_name: str,
     concurrency: int,
     export_jsonl_path: str | None = None,
+    debug: bool = False,
 ) -> CrawlReport:
     """Run one site adapter from discovery through upsert.
 
@@ -67,6 +87,7 @@ async def run_site_once(
         site_name: Registry name for the adapter.
         concurrency: Maximum concurrent detail fetches.
         export_jsonl_path: Optional JSONL export destination.
+        debug: Whether to print one stub and one record example.
 
     Returns:
         CrawlReport: Final crawl summary.
@@ -84,10 +105,10 @@ async def run_site_once(
                     browser_context=shared_browser_context,
                     session_factory=SessionLocal,
                 )
-                report, records = await _run_adapter(adapter, concurrency, report)
+                report, records = await _run_adapter(adapter, concurrency, report, debug=debug)
         else:
             adapter = adapter_cls(browser_context=None, session_factory=SessionLocal)
-            report, records = await _run_adapter(adapter, concurrency, report)
+            report, records = await _run_adapter(adapter, concurrency, report, debug=debug)
 
         if export_jsonl_path:
             export_jsonl(export_jsonl_path, records)
@@ -102,6 +123,8 @@ async def _run_adapter(
     adapter,
     concurrency: int,
     report: CrawlReport,
+    *,
+    debug: bool = False,
 ) -> tuple[CrawlReport, list[BaseRecord]]:
     """Process discovered stubs and persist fetched records.
 
@@ -109,6 +132,7 @@ async def _run_adapter(
         adapter: Site adapter instance.
         concurrency: Maximum concurrent detail fetches.
         report: Mutable report object for counters.
+        debug: Whether to print one stub and one record example.
 
     Returns:
         tuple[CrawlReport, list[BaseRecord]]: Updated report and fetched records.
@@ -117,13 +141,20 @@ async def _run_adapter(
     records: list[BaseRecord] = []
     discovered_stubs = await adapter.discover()
     report.discovered = len(discovered_stubs)
+    if debug and discovered_stubs:
+        print_debug_example("JobStub", discovered_stubs[0])
     semaphore = asyncio.Semaphore(max(1, min(8, concurrency)))
+    has_printed_record_example = False
 
     async def process_stub(stub) -> UpsertResult | None:
+        nonlocal has_printed_record_example
         async with semaphore:
             try:
                 record = await adapter.fetch_details(stub)
                 records.append(record)
+                if debug and not has_printed_record_example:
+                    has_printed_record_example = True
+                    print_debug_example(type(record).__name__, record)
                 return await adapter.upsert(record)
             except Exception:
                 report.failed += 1
@@ -185,6 +216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Run one crawl cycle and exit")
     parser.add_argument("--concurrency", type=int, default=4, help="Concurrent detail fetches")
     parser.add_argument("--export-jsonl", help="Optional JSONL export path")
+    parser.add_argument("--debug", action="store_true", help="Print one stub and one record example")
     return parser.parse_args()
 
 
@@ -203,6 +235,7 @@ async def main() -> None:
         site_name=cli_args.site,
         concurrency=cli_args.concurrency,
         export_jsonl_path=cli_args.export_jsonl,
+        debug=cli_args.debug,
     )
     print_report(report, export_jsonl_path=cli_args.export_jsonl)
 

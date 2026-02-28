@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Run one crawl iteration and exit")
     parser.add_argument("--export", help="Optional JSONL export path")
     parser.add_argument("--concurrency", type=int, default=4, help="Concurrent detail fetches")
+    parser.add_argument("--debug", action="store_true", help="Print one stub and one record example")
     return parser.parse_args()
 
 
@@ -43,6 +44,7 @@ async def main() -> None:
         site_name="ajira",
         concurrency=cli_args.concurrency,
         export_jsonl_path=cli_args.export,
+        debug=cli_args.debug,
     )
     print_report(report, export_jsonl_path=cli_args.export)
 
