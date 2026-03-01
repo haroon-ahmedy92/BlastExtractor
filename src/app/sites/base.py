@@ -9,17 +9,14 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.common import BaseRecord, BaseStub, ContentType, UpsertResult
 
-StubT = TypeVar("StubT", bound=BaseStub)
-RecordT = TypeVar("RecordT", bound=BaseRecord)
 
-
-class SiteAdapter(ABC, Generic[StubT, RecordT]):
+class SiteAdapter[StubT: BaseStub, RecordT: BaseRecord](ABC):
     """Base class for site-specific crawl plugins."""
 
     site_name: str
@@ -29,7 +26,7 @@ class SiteAdapter(ABC, Generic[StubT, RecordT]):
     def __init__(
         self,
         *,
-        browser_context: object | None,
+        browser_context: Any | None,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """Store shared runtime dependencies for an adapter.

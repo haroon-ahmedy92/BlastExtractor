@@ -9,7 +9,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text
+from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -20,14 +21,17 @@ class NewsArticle(Base):
 
     __tablename__ = "news_articles"
 
+    long_text_type = Text().with_variant(mysql.LONGTEXT(), "mysql")  # type: ignore[no-untyped-call]
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source: Mapped[str] = mapped_column(String(100), nullable=False)
     source_url: Mapped[str] = mapped_column(String(1000), unique=True, nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    body_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    section: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    body_text: Mapped[str | None] = mapped_column(long_text_type, nullable=True)
+    body_html: Mapped[str | None] = mapped_column(long_text_type, nullable=True)
     tags_json: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSON, nullable=True)
     attachments_json: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSON, nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)

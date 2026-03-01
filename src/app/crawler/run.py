@@ -19,7 +19,8 @@ from time import perf_counter
 from app.crawler.browser import browser_context
 from app.db.session import SessionLocal, engine, init_db
 from app.logging import setup_logging
-from app.models.common import BaseRecord, UpsertResult
+from app.models.common import BaseRecord, BaseStub, UpsertResult
+from app.sites.base import SiteAdapter
 from app.sites.registry import get_adapter
 
 
@@ -66,10 +67,7 @@ def print_debug_example(label: str, payload: object) -> None:
         None
     """
 
-    if hasattr(payload, "model_dump"):
-        serialized = payload.model_dump(mode="json")
-    else:
-        serialized = payload
+    serialized = payload.model_dump(mode="json") if hasattr(payload, "model_dump") else payload
     print(f"\nDebug {label}", file=sys.stderr)
     print(json.dumps(serialized, indent=2, ensure_ascii=False), file=sys.stderr)
 
@@ -80,6 +78,7 @@ async def run_site_once(
     concurrency: int,
     export_jsonl_path: str | None = None,
     debug: bool = False,
+    limit: int | None = None,
 ) -> CrawlReport:
     """Run one site adapter from discovery through upsert.
 
@@ -88,6 +87,7 @@ async def run_site_once(
         concurrency: Maximum concurrent detail fetches.
         export_jsonl_path: Optional JSONL export destination.
         debug: Whether to print one stub and one record example.
+        limit: Optional maximum number of discovered stubs to process.
 
     Returns:
         CrawlReport: Final crawl summary.
@@ -105,10 +105,22 @@ async def run_site_once(
                     browser_context=shared_browser_context,
                     session_factory=SessionLocal,
                 )
-                report, records = await _run_adapter(adapter, concurrency, report, debug=debug)
+                report, records = await _run_adapter(
+                    adapter,
+                    concurrency,
+                    report,
+                    debug=debug,
+                    limit=limit,
+                )
         else:
             adapter = adapter_cls(browser_context=None, session_factory=SessionLocal)
-            report, records = await _run_adapter(adapter, concurrency, report, debug=debug)
+            report, records = await _run_adapter(
+                adapter,
+                concurrency,
+                report,
+                debug=debug,
+                limit=limit,
+            )
 
         if export_jsonl_path:
             export_jsonl(export_jsonl_path, records)
@@ -120,11 +132,12 @@ async def run_site_once(
 
 
 async def _run_adapter(
-    adapter,
+    adapter: SiteAdapter[BaseStub, BaseRecord],
     concurrency: int,
     report: CrawlReport,
     *,
     debug: bool = False,
+    limit: int | None = None,
 ) -> tuple[CrawlReport, list[BaseRecord]]:
     """Process discovered stubs and persist fetched records.
 
@@ -133,6 +146,7 @@ async def _run_adapter(
         concurrency: Maximum concurrent detail fetches.
         report: Mutable report object for counters.
         debug: Whether to print one stub and one record example.
+        limit: Optional maximum number of discovered stubs to process.
 
     Returns:
         tuple[CrawlReport, list[BaseRecord]]: Updated report and fetched records.
@@ -140,13 +154,15 @@ async def _run_adapter(
 
     records: list[BaseRecord] = []
     discovered_stubs = await adapter.discover()
+    if limit is not None:
+        discovered_stubs = discovered_stubs[: max(0, limit)]
     report.discovered = len(discovered_stubs)
     if debug and discovered_stubs:
         print_debug_example("JobStub", discovered_stubs[0])
     semaphore = asyncio.Semaphore(max(1, min(8, concurrency)))
     has_printed_record_example = False
 
-    async def process_stub(stub) -> UpsertResult | None:
+    async def process_stub(stub: BaseStub) -> UpsertResult | None:
         nonlocal has_printed_record_example
         async with semaphore:
             try:
@@ -216,7 +232,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Run one crawl cycle and exit")
     parser.add_argument("--concurrency", type=int, default=4, help="Concurrent detail fetches")
     parser.add_argument("--export-jsonl", help="Optional JSONL export path")
-    parser.add_argument("--debug", action="store_true", help="Print one stub and one record example")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print one stub and one record example",
+    )
+    parser.add_argument("--limit", type=int, help="Optional limit on discovered records to process")
     return parser.parse_args()
 
 
@@ -236,6 +257,7 @@ async def main() -> None:
         concurrency=cli_args.concurrency,
         export_jsonl_path=cli_args.export_jsonl,
         debug=cli_args.debug,
+        limit=cli_args.limit,
     )
     print_report(report, export_jsonl_path=cli_args.export_jsonl)
 

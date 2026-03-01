@@ -8,7 +8,8 @@ without launching browsers repeatedly.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from app.config import get_settings
 
@@ -29,9 +30,15 @@ async def browser_context() -> AsyncIterator[object]:
             headless=settings.browser_headless,
             args=["--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = await browser.new_context(ignore_https_errors=True)
+        context = await browser.new_context(
+            ignore_https_errors=True,
+            user_agent=settings.browser_user_agent,
+            locale=settings.browser_accept_language.split(",")[0],
+            timezone_id=settings.browser_timezone,
+            extra_http_headers={"Accept-Language": settings.browser_accept_language},
+        )
 
-        async def block_unneeded_resources(route, request) -> None:
+        async def block_unneeded_resources(route: Any, request: Any) -> None:
             # Large assets rarely affect the text extraction we care about.
             if request.resource_type in {"font", "image", "media"}:
                 await route.abort()
@@ -44,5 +51,7 @@ async def browser_context() -> AsyncIterator[object]:
         try:
             yield context
         finally:
-            await context.close()
-            await browser.close()
+            with suppress(Exception):
+                await context.close()
+            with suppress(Exception):
+                await browser.close()

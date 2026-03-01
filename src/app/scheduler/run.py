@@ -11,9 +11,9 @@ import argparse
 import asyncio
 import fcntl
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from app.config import get_settings
 from app.crawler.run import print_report, run_site_once

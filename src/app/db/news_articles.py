@@ -44,6 +44,7 @@ async def upsert_news_article(
             existing_article.title = record.title
             existing_article.author = record.author
             existing_article.published_at = record.published_at
+            existing_article.section = record.section
             existing_article.body_text = record.body_text
             existing_article.body_html = record.body_html
             existing_article.tags_json = record.tags_json
@@ -59,6 +60,7 @@ async def upsert_news_article(
         title=record.title,
         author=record.author,
         published_at=record.published_at,
+        section=record.section,
         body_text=record.body_text,
         body_html=record.body_html,
         tags_json=record.tags_json,

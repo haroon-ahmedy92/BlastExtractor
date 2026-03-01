@@ -43,10 +43,10 @@ async def upsert_exam_result(
         action: UpsertAction = "unchanged"
         if existing_exam_result.content_hash != record.content_hash:
             existing_exam_result.title = record.title
-            existing_exam_result.candidate_no = record.candidate_no
             existing_exam_result.year = record.year
             existing_exam_result.exam_type = record.exam_type
-            existing_exam_result.school = record.school
+            existing_exam_result.centre_code = record.centre_code
+            existing_exam_result.centre_name = record.centre_name
             existing_exam_result.results_json = record.results_json
             existing_exam_result.content_hash = record.content_hash
             action = "updated"
@@ -60,10 +60,10 @@ async def upsert_exam_result(
         source=record.source,
         source_url=str(record.source_url),
         title=record.title,
-        candidate_no=record.candidate_no,
         year=record.year,
         exam_type=record.exam_type,
-        school=record.school,
+        centre_code=record.centre_code,
+        centre_name=record.centre_name,
         results_json=record.results_json,
         content_hash=record.content_hash,
         first_seen=current_time,

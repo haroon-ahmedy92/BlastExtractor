@@ -7,11 +7,16 @@ records, and small helpers that make hashing and validation more stable.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_validator
+
+HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 def normalize_whitespace(value: str) -> str:
@@ -55,7 +60,80 @@ def parse_optional_date(value: date | datetime | str | None) -> date | None:
     raise ValueError(f"Unsupported date format: {value}")
 
 
-class ContentType(str, Enum):
+def parse_optional_datetime(value: datetime | str | None) -> datetime | None:
+    """Parse a datetime value in a small set of supported formats.
+
+    Args:
+        value: Datetime-like value or ``None``.
+
+    Returns:
+        datetime | None: Parsed datetime or ``None`` when input is empty.
+    """
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    text = normalize_whitespace(value)
+    candidates = (
+        text.replace("Z", "+00:00"),
+        text,
+    )
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    for fmt in (
+        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y %H:%M",
+        "%A, %B %d, %Y - %H:%M",
+        "%A, %B %d, %Y",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def validate_http_url(url: str) -> HttpUrl:
+    """Validate and normalize a raw string URL into ``HttpUrl``.
+
+    Args:
+        url: Raw URL string.
+
+    Returns:
+        HttpUrl: Validated Pydantic URL object.
+    """
+
+    return HTTP_URL_ADAPTER.validate_python(url)
+
+
+def compute_content_hash(payload: Mapping[str, object]) -> str:
+    """Compute a stable hash for a normalized record payload.
+
+    Args:
+        payload: JSON-serializable content payload.
+
+    Returns:
+        str: SHA-256 hex digest.
+    """
+
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class ContentType(StrEnum):
     """Known content groups handled by the crawler."""
 
     JOBS = "jobs"

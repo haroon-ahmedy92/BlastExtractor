@@ -27,6 +27,7 @@ def test_news_article_upsert_behaviour(tmp_path) -> None:
                 title="Breaking News",
                 author="Reporter",
                 published_at=datetime.now(UTC),
+                section="National",
                 body_text="Important body",
                 body_html="<p>Important body</p>",
                 tags_json=["news"],
@@ -39,7 +40,9 @@ def test_news_article_upsert_behaviour(tmp_path) -> None:
                 assert result.action == "inserted"
                 first_id = first.id
 
-            updated = record.model_copy(update={"body_text": "Updated body", "content_hash": "hash-2"})
+            updated = record.model_copy(
+                update={"body_text": "Updated body", "content_hash": "hash-2"}
+            )
             async with session_factory() as session:
                 second, result = await upsert_news_article(session, updated)
                 await session.commit()
@@ -72,10 +75,10 @@ def test_exam_result_upsert_behaviour(tmp_path) -> None:
                 source="exam_stub",
                 source_url="https://example.com/exams/1",
                 title="CSEE 2025",
-                candidate_no="S001-0001",
                 year=2025,
                 exam_type="CSEE",
-                school="Example School",
+                centre_code="S001",
+                centre_name="Example School",
                 results_json={"Math": "A"},
                 content_hash="hash-1",
             )
@@ -85,7 +88,9 @@ def test_exam_result_upsert_behaviour(tmp_path) -> None:
                 assert result.action == "inserted"
                 first_id = first.id
 
-            updated = record.model_copy(update={"school": "Updated School", "content_hash": "hash-2"})
+            updated = record.model_copy(
+                update={"centre_name": "Updated School", "content_hash": "hash-2"}
+            )
             async with session_factory() as session:
                 second, result = await upsert_exam_result(session, updated)
                 await session.commit()

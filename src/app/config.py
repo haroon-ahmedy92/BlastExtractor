@@ -25,9 +25,14 @@ class Settings:
     browser_headless: bool
     browser_timeout_ms: int
     browser_rate_limit_seconds: float
+    browser_user_agent: str
+    browser_accept_language: str
+    browser_timezone: str
     scheduler_interval_minutes: int
     scheduler_refresh_after_days: int
     scheduler_lock_path: str
+    zoom_jobs_max_pages: int
+    mwananchi_enabled: bool
 
 
 @lru_cache(maxsize=1)
@@ -41,6 +46,12 @@ def get_settings() -> Settings:
     load_dotenv()
 
     browser_headless = os.getenv("BROWSER_HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
+    mwananchi_enabled = os.getenv("MWANANCHI_ENABLED", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     return Settings(
         app_env=os.getenv("APP_ENV", "development"),
         app_name=os.getenv("APP_NAME", "BlastExtractor"),
@@ -54,7 +65,18 @@ def get_settings() -> Settings:
         browser_headless=browser_headless,
         browser_timeout_ms=int(os.getenv("BROWSER_TIMEOUT_MS", "30000")),
         browser_rate_limit_seconds=float(os.getenv("BROWSER_RATE_LIMIT_SECONDS", "0.25")),
+        browser_user_agent=os.getenv(
+            "BROWSER_USER_AGENT",
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+            ),
+        ),
+        browser_accept_language=os.getenv("BROWSER_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+        browser_timezone=os.getenv("BROWSER_TIMEZONE", "Africa/Dar_es_Salaam"),
         scheduler_interval_minutes=int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "30")),
         scheduler_refresh_after_days=int(os.getenv("SCHEDULER_REFRESH_AFTER_DAYS", "7")),
         scheduler_lock_path=os.getenv("SCHEDULER_LOCK_PATH", "/tmp/blastextractor-scheduler.lock"),
+        zoom_jobs_max_pages=int(os.getenv("ZOOM_JOBS_MAX_PAGES", "5")),
+        mwananchi_enabled=mwananchi_enabled,
     )

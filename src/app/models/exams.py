@@ -18,8 +18,10 @@ class ExamStub(BaseStub):
 
     year: int | None = None
     exam_type: str | None = None
+    centre_code: str | None = None
+    centre_name: str | None = None
 
-    @field_validator("exam_type")
+    @field_validator("exam_type", "centre_code", "centre_name")
     @classmethod
     def _normalize_exam_type(cls, value: str | None) -> str | None:
         if value is None:
@@ -31,13 +33,13 @@ class ExamStub(BaseStub):
 class ExamRecord(BaseRecord):
     """Normalized exam result ready for database upsert."""
 
-    candidate_no: str | None = None
     year: int | None = None
     exam_type: str | None = None
-    school: str | None = None
+    centre_code: str | None = None
+    centre_name: str | None = None
     results_json: dict[str, Any] | list[Any] | None = None
 
-    @field_validator("candidate_no", "exam_type", "school")
+    @field_validator("exam_type", "centre_code", "centre_name")
     @classmethod
     def _normalize_text_fields(cls, value: str | None) -> str | None:
         if value is None:

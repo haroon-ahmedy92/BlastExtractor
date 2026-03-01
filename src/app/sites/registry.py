@@ -7,11 +7,11 @@ ensures they register themselves before lookup happens.
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Any
 
 from app.sites.base import SiteAdapter
 
-AdapterType: TypeAlias = type[SiteAdapter]
+type AdapterType = type[SiteAdapter[Any, Any]]
 
 REGISTRY: dict[str, AdapterType] = {}
 
@@ -51,5 +51,10 @@ def get_adapter(site_name: str) -> AdapterType:
 
 
 import app.sites.ajira_portal  # noqa: E402,F401
+import app.sites.bmz_exams  # noqa: E402,F401
+import app.sites.citizen_news  # noqa: E402,F401
 import app.sites.exam_stub  # noqa: E402,F401
+import app.sites.mwananchi_news  # noqa: E402,F401
+import app.sites.necta_exams  # noqa: E402,F401
 import app.sites.news_stub  # noqa: E402,F401
+import app.sites.zoom_jobs  # noqa: E402,F401

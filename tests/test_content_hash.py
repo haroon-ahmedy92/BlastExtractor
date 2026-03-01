@@ -1,4 +1,4 @@
-from app.sites.ajira_portal import compute_content_hash
+from app.models.common import compute_content_hash
 
 
 def test_content_hash_is_deterministic_for_same_payload() -> None:

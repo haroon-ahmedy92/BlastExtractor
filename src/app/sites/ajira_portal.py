@@ -8,20 +8,26 @@ table upserts.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from asyncio import Lock, sleep
 from datetime import date, datetime
 from time import monotonic
+from typing import Any
 from urllib.parse import urljoin
 
 from lxml import html
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
 from app.db.job_postings import upsert_job_posting
-from app.models.common import ContentType, UpsertResult, normalize_whitespace, parse_optional_date
+from app.models.common import (
+    ContentType,
+    UpsertResult,
+    compute_content_hash,
+    normalize_whitespace,
+    validate_http_url,
+)
 from app.models.jobs import JobRecord, JobStub
 from app.sites.base import SiteAdapter
 from app.sites.registry import register_adapter
@@ -207,7 +213,7 @@ def _parse_table_row(row: html.HtmlElement, base_url: str) -> JobStub | None:
             institution=institution,
             number_of_posts=number_of_posts,
             deadline_date=deadline_date,
-            url=details_url,
+            url=validate_http_url(details_url),
         )
     except Exception:
         return None
@@ -236,7 +242,10 @@ def _parse_from_links(tree: html.HtmlElement, base_url: str) -> list[JobStub]:
         lower_text = container_text.lower()
         if len(container_text) < 20:
             continue
-        if not any(signal in lower_text for signal in ("number of posts", "deadline", "close date", "login to apply")):
+        if not any(
+            signal in lower_text
+            for signal in ("number of posts", "deadline", "close date", "login to apply")
+        ):
             continue
 
         title = _title_from_container(container)
@@ -261,7 +270,7 @@ def _parse_from_links(tree: html.HtmlElement, base_url: str) -> list[JobStub]:
                     institution=institution,
                     number_of_posts=_parse_number_of_posts(number_label or container_text),
                     deadline_date=_parse_date(deadline_label or container_text),
-                    url=details_url,
+                    url=validate_http_url(details_url),
                 )
             )
             seen_urls.add(details_url)
@@ -298,7 +307,9 @@ def _extract_attachments(tree: html.HtmlElement, base_url: str) -> list[str]:
             continue
         lower_href = href.lower()
         looks_attachment = lower_href.endswith(ATTACHMENT_EXTENSIONS) or "download" in lower_href
-        looks_attachment = looks_attachment or any(k in text for k in ("attachment", "pdf", "doc", "download"))
+        looks_attachment = looks_attachment or any(
+            keyword in text for keyword in ("attachment", "pdf", "doc", "download")
+        )
         if not looks_attachment:
             continue
         absolute = urljoin(base_url, href)
@@ -400,7 +411,8 @@ def _extract_description(tree: html.HtmlElement) -> tuple[str | None, str | None
         if parent is not None:
             parent.remove(node)
     candidates = tree.xpath(
-        "//main|//article|//section|//div[contains(@class,'description') or contains(@class,'content')]"
+        "//main|//article|//section|"
+        "//div[contains(@class,'description') or contains(@class,'content')]"
     )
     best = None
     best_len = 0
@@ -442,28 +454,18 @@ def parse_listing_detail_from_html(
     structured_fields = _extract_structured_fields(document_tree)
     return description_text, description_html, attachments, extra_metadata, structured_fields
 
-
-def compute_content_hash(payload: dict[str, object]) -> str:
-    """Compute a stable content hash for a normalized record payload.
-
-    Args:
-        payload: JSON-serializable payload containing meaningful content fields.
-
-    Returns:
-        str: SHA-256 hex digest.
-    """
-
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 class AjiraPortalAdapter(SiteAdapter[JobStub, JobRecord]):
     """Site adapter that crawls Ajira Portal job postings."""
 
     site_name = "ajira"
     content_type = ContentType.JOBS
 
-    def __init__(self, *, browser_context: object | None, session_factory) -> None:
+    def __init__(
+        self,
+        *,
+        browser_context: Any | None,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
         """Create an Ajira adapter with shared runtime dependencies.
 
         Args:
@@ -511,7 +513,7 @@ class AjiraPortalAdapter(SiteAdapter[JobStub, JobRecord]):
                         await page.wait_for_selector(wait_selector)
                     else:
                         await page.wait_for_load_state("networkidle")
-                    return await page.content()
+                    return str(await page.content())
                 except Exception as error:
                     error_type = self._classify_error(error)
                     raise error_type(str(error)) from error
@@ -551,11 +553,13 @@ class AjiraPortalAdapter(SiteAdapter[JobStub, JobRecord]):
         description_text, description_html, attachment_links, extra_metadata, structured_fields = (
             parse_listing_detail_from_html(page_html, base_url=str(stub.url))
         )
-        metadata = dict(extra_metadata or {})
+        metadata: dict[str, object] = dict(extra_metadata or {})
         if structured_fields:
             metadata["structured_fields"] = structured_fields
         category = metadata.get("category") or metadata.get("job category")
         location = metadata.get("duty station") or metadata.get("location")
+        category_text = str(category) if isinstance(category, str) else None
+        location_text = str(location) if isinstance(location, str) else None
         attachments_json = None
         if attachment_links or metadata:
             attachments_json = {"links": attachment_links, "metadata": metadata}
@@ -572,13 +576,13 @@ class AjiraPortalAdapter(SiteAdapter[JobStub, JobRecord]):
         }
         return JobRecord(
             source=self.site_name,
-            source_url=str(stub.url),
+            source_url=validate_http_url(str(stub.url)),
             title=stub.title or "Unknown",
             institution=stub.institution or "Unknown",
             number_of_posts=stub.number_of_posts,
             deadline_date=stub.deadline_date,
-            category=category,
-            location=location,
+            category=category_text,
+            location=location_text,
             description_text=description_text,
             description_html=description_html,
             attachments_json=attachments_json,

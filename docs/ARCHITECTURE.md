@@ -102,6 +102,11 @@ site name -> adapter class
 Examples:
 
 - `ajira` -> `AjiraPortalAdapter`
+- `citizen_news` -> `TheCitizenNewsAdapter`
+- `mwananchi_news` -> `MwananchiNewsAdapter`
+- `zoom_jobs` -> `ZoomTanzaniaJobsAdapter`
+- `bmz_exams` -> `ZanzibarBMZExamAdapter`
+- `necta_exams` -> `NectaExamAdapter`
 - `news_stub` -> `GenericNewsStubAdapter`
 - `exam_stub` -> `GenericExamStubAdapter`
 
@@ -117,6 +122,8 @@ That context is configured for speed:
 
 - runs in headless mode if enabled in config
 - blocks images, fonts, and media files
+- uses realistic browser headers such as `User-Agent` and `Accept-Language`
+- sets the browser timezone from config
 - reuses one browser and one context for the whole crawl run
 - sets default timeouts
 
@@ -281,7 +288,7 @@ Why this matters:
 
 - jobs have fields like `institution` and `deadline_date`
 - news articles have fields like `author` and `published_at`
-- exam results have fields like `candidate_no` and `results_json`
+- exam results have fields like `centre_code`, `centre_name`, and `results_json`
 
 If all content lived in one big table, many columns would be empty or confusing. Separate tables keep the data easier to understand and query.
 
@@ -367,6 +374,11 @@ Responsibility:
 Examples:
 
 - `ajira_portal.py`
+- `citizen_news.py`
+- `mwananchi_news.py`
+- `zoom_jobs.py`
+- `bmz_exams.py`
+- `necta_exams.py`
 - `news_stub.py`
 - `exam_stub.py`
 
@@ -384,7 +396,90 @@ Responsibility:
 
 Good tests are especially important in scraping projects because website HTML can change without warning.
 
-## 6. How To Add a New Site
+## 6. Registered Adapters and Safe Run Patterns
+
+The current adapters are:
+
+- `ajira`: Ajira job postings
+- `citizen_news`: The Citizen Tanzania news articles
+- `mwananchi_news`: Mwananchi news articles, with graceful skip when blocked
+- `zoom_jobs`: Zoom Tanzania job postings
+- `bmz_exams`: Zanzibar BMZ exam-centre result pages
+- `necta_exams`: NECTA centre result pages discovered from result index pages
+
+### How each adapter works
+
+`ajira`
+
+- discovers vacancies from the Ajira listing page
+- fetches one detail page per vacancy
+- writes `JobRecord` rows into `job_postings`
+
+`citizen_news`
+
+- opens the Tanzania news listing page
+- extracts article links and titles
+- parses article detail pages for title, author, published date, section, and body
+- writes `NewsRecord` rows into `news_articles`
+
+`mwananchi_news`
+
+- opens the Mwananchi homepage with browser-like headers and shared browser state
+- extracts article links when the site allows navigation
+- logs a structured `blocked` event and returns no stubs if the site blocks the crawler
+- can be disabled with `MWANANCHI_ENABLED=false`
+- writes `NewsRecord` rows into `news_articles`
+
+`zoom_jobs`
+
+- opens the Zoom Tanzania jobs listing
+- follows pagination until `ZOOM_JOBS_MAX_PAGES` or until no new jobs appear
+- parses job detail pages for company, job type, location, description, skills, and apply links
+- writes `JobRecord` rows into `job_postings`
+
+`bmz_exams`
+
+- opens the BMZ schools landing page
+- discovers exam-year index pages
+- opens each exam index page and discovers centre result pages
+- parses centre tables into structured JSON
+- writes `ExamRecord` rows into `exam_results`
+
+`necta_exams`
+
+- opens NECTA exam view pages such as CSEE, ACSEE, PSLE, and FTNA
+- discovers year-specific results index pages
+- opens each results index and discovers centre result pages
+- parses centre tables into structured JSON
+- logs and skips blocked or unreachable pages instead of crashing the whole run
+- writes `ExamRecord` rows into `exam_results`
+
+### Safe CLI examples
+
+Use these commands from the project root:
+
+```bash
+python -m app.crawler.run --site ajira --once --concurrency 3
+python -m app.crawler.run --site citizen_news --once --concurrency 3
+python -m app.crawler.run --site mwananchi_news --once --concurrency 2
+python -m app.crawler.run --site zoom_jobs --once --concurrency 3
+python -m app.crawler.run --site bmz_exams --once --concurrency 2 --limit 50
+python -m app.crawler.run --site necta_exams --once --concurrency 2 --limit 50
+```
+
+Why the exam commands use `--limit`:
+
+- exam sites can expose thousands of centre pages
+- a smaller first run is safer and easier to validate
+- you can increase the limit gradually once parsing is confirmed
+
+### Known limitations
+
+- Mwananchi may block non-human traffic even with Playwright and browser-like headers.
+- NECTA entry pages may reset or block connections depending on network conditions.
+- News layouts can change without notice, so selector drift is expected over time.
+
+## 7. How To Add a New Site
 
 Use this checklist.
 
@@ -442,7 +537,7 @@ If you are adding a new site, you should only need to touch:
 
 The generic runner should not need site-specific changes.
 
-## 7. Common Failure Points and Debugging Tips
+## 8. Common Failure Points and Debugging Tips
 
 ### 1. Selector changes
 
@@ -463,6 +558,7 @@ What to do:
 - write parsing tests using saved HTML samples
 
 Ajira is a good example of this kind of risk. If the listing page changes, the adapter may still run but discover zero jobs.
+The same risk applies to The Citizen, Mwananchi, Zoom, BMZ, and NECTA selectors.
 
 ### 2. Timeouts
 
@@ -497,6 +593,7 @@ What to do:
 - temporarily disable or relax request blocking in `app/crawler/browser.py`
 - inspect network behavior
 - confirm whether the data is in the initial HTML or loaded later by JavaScript
+- remember that Mwananchi may block even when the page is valid in a normal browser
 
 ### 4. Database uniqueness errors
 
@@ -515,6 +612,7 @@ What to do:
 - make sure `source_url` is stable and normalized
 - if a site needs a different unique rule, design it clearly before coding
 - confirm that `content_hash` is used only for change detection, not as the primary identifier
+- for BMZ and NECTA, keep centre URLs stable and avoid inventing synthetic keys unless needed
 
 ### 5. Bad normalization
 
@@ -532,7 +630,7 @@ What to do:
 - parse dates into consistent formats
 - avoid hashing values that are noisy or irrelevant
 
-## 8. Glossary
+## 9. Glossary
 
 **Adapter**
 Code that knows how to crawl one website.
